@@ -238,15 +238,27 @@ pub fn run(options: Options, ctx: impl term::Context) -> anyhow::Result<()> {
             unified,
             hunk,
         } if by_hunk => {
+            dbg!(&verdict);
             let mut opts = git::raw::DiffOptions::new();
             opts.patience(true)
                 .minimal(true)
                 .context_lines(unified as u32);
 
-            builder::ReviewBuilder::new(patch_id, *profile.id(), &repository)
-                .hunk(hunk)
-                .verdict(verdict)
-                .run(&revision, &mut opts)?;
+            if let Some(comments) =
+                builder::ReviewBuilder::new(patch_id, *profile.id(), &repository)
+                    .hunk(hunk)
+                    .verdict(verdict)
+                    .run(&profile, &revision, &mut opts)?
+            {
+                for comment in comments {
+                    patch.code_comment(
+                        revision_id,
+                        comment.0,
+                        comment.1,
+                        &term::signer(&profile)?,
+                    )?;
+                }
+            }
         }
         Operation::Review { verdict, .. } => {
             let message = options.message.get(REVIEW_HELP_MSG)?;

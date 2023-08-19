@@ -16,14 +16,16 @@ use std::io::IsTerminal as _;
 use std::str::FromStr;
 use std::{fmt, io};
 
-use radicle::cob::patch::{PatchId, Revision, Verdict};
+use radicle::cob::patch::{PatchId, Patches, Revision, Verdict};
 use radicle::git;
 use radicle::prelude::*;
 use radicle::storage::git::Repository;
+use radicle_cob::history::EntryId;
 use radicle_surf::diff::*;
 
 use crate::git::unified_diff;
 use crate::terminal as term;
+use crate::terminal::patch::review::Comment;
 
 /// Help message shown to user.
 const HELP: &str = "\
@@ -197,7 +199,11 @@ impl<'a> ReviewBuilder<'a> {
     }
 
     /// Run the review builder for the given revision.
-    pub fn run(self, revision: &Revision, opts: &mut git::raw::DiffOptions) -> anyhow::Result<()> {
+    pub fn run(
+        self,
+        revision: &Revision,
+        opts: &mut git::raw::DiffOptions,
+    ) -> anyhow::Result<Option<Vec<Comment>>> {
         let repo = self.repo.raw();
         let base = repo.find_commit((*revision.base()).into())?;
         let author = repo.signature()?;
@@ -236,12 +242,13 @@ impl<'a> ReviewBuilder<'a> {
         find_opts.all(true);
         find_opts.copies(false); // We don't support finding copies at the moment.
 
+        let mut comments = None;
         let mut diff = repo.diff_tree_to_tree(Some(&brain), Some(&tree), Some(opts))?;
         diff.find_similar(Some(&mut find_opts))?;
 
         if diff.deltas().next().is_none() {
             term::success!("All hunks have been reviewed");
-            return Ok(());
+            return Ok(comments);
         }
         let diff = Diff::try_from(diff)?;
 
@@ -313,11 +320,23 @@ impl<'a> ReviewBuilder<'a> {
                     // Do nothing. Hunk will be reviewable again next time.
                 }
                 Some(ReviewAction::Comment) => {
-                    eprintln!(
-                        "{}",
-                        term::format::tertiary("Commenting is not yet implemented").bold()
-                    );
-                    queue.push_front((ix, item));
+                    let hunk = hunk.expect("hunk must be present when commenting");
+                    let mut buf = Vec::new();
+                    {
+                        let mut writer = unified_diff::Writer::new(&mut buf);
+                        writer.encode(hunk)?;
+                    }
+                    // edit returns None if input and output are identical. Should be treated
+                    // equivalent to the reviewer not leaving any comments.
+                    if let Some(ret) = term::Editor::new().extension("diff").edit(&buf)? {
+                        let hunk_comments =
+                            term::patch::review::parse_hunk_comments(file, hunk, ret)?;
+                        if comments.is_none() && !hunk_comments.is_empty() {
+                            comments = Some(hunk_comments);
+                        } else {
+                            comments.as_mut().unwrap().extend(hunk_comments);
+                        }
+                    }
                 }
                 Some(ReviewAction::Split) => {
                     eprintln!(
@@ -356,7 +375,7 @@ impl<'a> ReviewBuilder<'a> {
             }
         }
 
-        Ok(())
+        Ok(comments)
     }
 
     fn prompt(

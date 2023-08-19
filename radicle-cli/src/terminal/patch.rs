@@ -12,6 +12,8 @@ use radicle::git;
 use crate::terminal as term;
 use crate::terminal::Element;
 
+pub mod review;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error(transparent)]
