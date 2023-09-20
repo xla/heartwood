@@ -177,6 +177,8 @@ impl<'a> ReviewBuilder<'a> {
     pub fn new(patch_id: PatchId, nid: NodeId, repo: &'a Repository) -> Self {
         Self {
             patch_id,
+            // TODO(xla): Validate this leads to correct UX for potentially abandoned drafts on
+            // past revisions.
             refname: git::refs::storage::draft::review(&nid, &patch_id),
             repo,
             hunk: None,
@@ -202,7 +204,14 @@ impl<'a> ReviewBuilder<'a> {
         let base = repo.find_commit((*revision.base()).into())?;
         let author = repo.signature()?;
         let patch_id = self.patch_id;
-        let review = if let Ok(c) = self.current() {
+        let tree = {
+            let commit = repo.find_commit(revision.head().into())?;
+            commit.tree()?
+        };
+
+        let mut stdin = io::stdin().lock();
+        let mut stderr = io::stderr().lock();
+        let mut review = if let Ok(c) = self.current() {
             term::success!(
                 "Loaded existing review {} for patch {}",
                 term::format::secondary(term::format::parens(term::format::oid(c.id()))),
@@ -216,20 +225,16 @@ impl<'a> ReviewBuilder<'a> {
                 &author,
                 &format!("Review {patch_id}"),
                 &base.tree()?,
+                // TODO(xla): Verify this is necessary, shouldn't matter.
                 &[&base],
             )?;
             repo.find_commit(oid)?
         };
+        let mut brain = review.tree()?;
 
         let mut writer = unified_diff::Writer::new(io::stdout()).styled(true);
         let mut queue = ReviewQueue::default(); // Queue of hunks to review.
         let mut current = None; // File of the current hunk.
-        let mut stdin = io::stdin().lock();
-        let mut stderr = io::stderr().lock();
-
-        let commit = repo.find_commit(revision.head().into())?;
-        let tree = commit.tree()?;
-        let brain = review.tree()?;
 
         let mut find_opts = git::raw::DiffFindOptions::new();
         find_opts.exact_match_only(true);
@@ -303,11 +308,12 @@ impl<'a> ReviewBuilder<'a> {
                     let diff = git::raw::Diff::from_buffer(&buf)?;
 
                     let mut index = repo.apply_to_tree(&brain, &diff, None)?;
-                    let brain = index.write_tree_to(repo)?;
-                    let brain = repo.find_tree(brain)?;
+                    let brain_oid = index.write_tree_to(repo)?;
+                    brain = repo.find_tree(brain_oid)?;
 
-                    let _oid =
+                    let oid =
                         review.amend(Some(&self.refname), None, None, None, None, Some(&brain))?;
+                    review = repo.find_commit(oid)?;
                 }
                 Some(ReviewAction::Ignore) => {
                     // Do nothing. Hunk will be reviewable again next time.
