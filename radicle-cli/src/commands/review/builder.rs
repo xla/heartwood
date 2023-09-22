@@ -22,7 +22,7 @@ use radicle::prelude::*;
 use radicle::storage::git::Repository;
 use radicle_surf::diff::*;
 
-use crate::git::unified_diff;
+use crate::git::unified_diff::{self, Encode};
 use crate::terminal as term;
 
 /// Help message shown to user.
@@ -276,6 +276,7 @@ impl<'a> ReviewBuilder<'a> {
             }
         }
         let total = queue.len();
+        let mut delta: i32 = 0;
 
         while let Some((ix, item)) = queue.next() {
             if let Some(hunk) = self.hunk {
@@ -289,10 +290,17 @@ impl<'a> ReviewBuilder<'a> {
             if current.map_or(true, |c| c != file) {
                 writer.encode(&unified_diff::FileHeader::from(file))?;
                 current = Some(file);
+                delta = 0;
             }
-            if let Some(h) = hunk {
+
+            let header = if let Some(h) = hunk {
+                let header = unified_diff::HunkHeader::try_from(h)?;
                 writer.encode(h)?;
-            }
+
+                Some(header)
+            } else {
+                None
+            };
 
             match self.prompt(&mut stdin, &mut stderr, progress) {
                 Some(ReviewAction::Accept) => {
@@ -301,8 +309,17 @@ impl<'a> ReviewBuilder<'a> {
                         let mut writer = unified_diff::Writer::new(&mut buf);
 
                         writer.encode(&unified_diff::FileHeader::from(file))?;
-                        if let Some(h) = hunk {
-                            writer.encode(h)?;
+                        if let (Some(h), Some(mut header)) = (hunk, header) {
+                            header.old_line_no -= delta as u32;
+                            header.new_line_no -= delta as u32;
+
+                            let h = Hunk {
+                                header: header.to_unified_string()?.as_bytes().to_owned().into(),
+                                lines: h.lines.clone(),
+                                old: h.old.clone(),
+                                new: h.new.clone(),
+                            };
+                            writer.encode(&h)?;
                         }
                     }
                     let diff = git::raw::Diff::from_buffer(&buf)?;
@@ -317,6 +334,10 @@ impl<'a> ReviewBuilder<'a> {
                 }
                 Some(ReviewAction::Ignore) => {
                     // Do nothing. Hunk will be reviewable again next time.
+
+                    if let Some(h) = header {
+                        delta += h.new_size as i32 - h.old_size as i32;
+                    }
                 }
                 Some(ReviewAction::Comment) => {
                     eprintln!(
